@@ -7,7 +7,7 @@
     return;
   }
 
-  const activities = payload.activities;
+  const activities = payload.activities.map(normalizeActivityText);
   const meta = payload.meta;
   const recordUrlBase = meta.recordUrlBase || "https://moonton.feishu.cn/base/NPY7bO3w1aUaCFsGRP0c5Y5Yn1M?table=tblNdmfezEMz71fb";
   const QUALITY_ORDER = { "S+": 0, SP: 1, S: 2, "A+": 3, A: 4, B: 5, "/": 6 };
@@ -82,6 +82,58 @@
   function escapeHtml(value = "") {
     return String(value).replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]);
   }
+  function parseLinkedText(value = "") {
+    const source = String(value || "");
+    const pattern = /\[([^\]\r\n]+)\]\((https?:\/\/[^)\s]+)\)/gi;
+    const links = [];
+    let text = "";
+    let cursor = 0;
+    for (const match of source.matchAll(pattern)) {
+      text += source.slice(cursor, match.index);
+      const start = text.length;
+      text += match[1];
+      links.push({ start, end: text.length, url: match[2] });
+      cursor = match.index + match[0].length;
+    }
+    text += source.slice(cursor);
+    return { text, links };
+  }
+  function safeExternalUrl(value) {
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+    } catch {
+      return null;
+    }
+  }
+  function renderLinkedText(text, links = []) {
+    if (!links.length) return escapeHtml(text);
+    let html = "";
+    let cursor = 0;
+    links.forEach((link) => {
+      const url = safeExternalUrl(link.url);
+      if (!url || link.start < cursor || link.end > text.length) return;
+      html += escapeHtml(text.slice(cursor, link.start));
+      html += `<a class="inline-source-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text.slice(link.start, link.end))}</a>`;
+      cursor = link.end;
+    });
+    return html + escapeHtml(text.slice(cursor));
+  }
+  function normalizeActivityText(activity) {
+    const name = parseLinkedText(activity.name);
+    const hotspot = parseLinkedText(activity.hotspot);
+    return {
+      ...activity,
+      name: name.text,
+      nameLinks: name.links,
+      hotspot: hotspot.text || null,
+      hotspotLinks: hotspot.links,
+      resources: activity.resources.map((resource) => {
+        const resourceName = parseLinkedText(resource.name);
+        return { ...resource, name: resourceName.text, nameLinks: resourceName.links };
+      }),
+    };
+  }
   function qualityClass(value) { return { A: "q-a", "A+": "q-ap", S: "q-s", SP: "q-sp", "S+": "q-splus", B: "q-b" }[value] || "q-a"; }
   function qualityBadge(value, extra = "") {
     if (!value || value === "/") return "";
@@ -146,17 +198,84 @@
     }))
     .sort((left, right) => left.name.localeCompare(right.name, "zh-CN", { numeric: true }));
 
+  function hotspotOptionText(group) {
+    return `${group.name}——${group.activities.length}个活动`;
+  }
+
+  function selectedHotspotGroup(value) {
+    const normalized = String(value || "").trim();
+    return hotspotCatalog.find((group) => normalized === group.name || normalized === hotspotOptionText(group)) || null;
+  }
+
+  let visibleHotspotOptions = [];
+  let activeHotspotOptionIndex = -1;
+
+  function hotspotChoices(query = "") {
+    const normalized = String(query || "").trim().toLocaleLowerCase("zh-CN");
+    const choices = hotspotCatalog
+      .map((group) => ({ value: hotspotOptionText(group), group }))
+      .filter((choice) => !normalized || choice.value.toLocaleLowerCase("zh-CN").includes(normalized));
+    if (!normalized || "无关联热点".includes(normalized)) choices.unshift({ value: "无关联热点", group: null });
+    return choices;
+  }
+
+  function renderHotspotOptions(query = "", open = true) {
+    visibleHotspotOptions = hotspotChoices(query);
+    activeHotspotOptionIndex = -1;
+    dom.hotspot.removeAttribute("aria-activedescendant");
+    dom.hotspotOptions.innerHTML = visibleHotspotOptions
+      .map((choice, index) => `<button type="button" class="hotspot-option" id="hotspot-option-${index}" role="option" aria-selected="false" data-option-index="${index}" data-option-value="${escapeHtml(choice.value)}" title="${escapeHtml(choice.value)}">${escapeHtml(choice.value)}</button>`)
+      .join("");
+    dom.hotspotOptions.hidden = !open || !visibleHotspotOptions.length;
+    dom.hotspot.setAttribute("aria-expanded", String(open && visibleHotspotOptions.length > 0));
+  }
+
+  function closeHotspotOptions() {
+    dom.hotspotOptions.hidden = true;
+    dom.hotspot.setAttribute("aria-expanded", "false");
+    dom.hotspot.removeAttribute("aria-activedescendant");
+    activeHotspotOptionIndex = -1;
+  }
+
+  function activateHotspotOption(index) {
+    if (!visibleHotspotOptions.length) return;
+    activeHotspotOptionIndex = (index + visibleHotspotOptions.length) % visibleHotspotOptions.length;
+    const options = [...dom.hotspotOptions.querySelectorAll(".hotspot-option")];
+    options.forEach((option, optionIndex) => {
+      const selected = optionIndex === activeHotspotOptionIndex;
+      option.classList.toggle("is-active", selected);
+      option.setAttribute("aria-selected", String(selected));
+    });
+    const active = options[activeHotspotOptionIndex];
+    if (active) {
+      dom.hotspot.setAttribute("aria-activedescendant", active.id);
+      active.scrollIntoView({ block: "nearest" });
+    }
+  }
+
   function populateHotspotFilter() {
-    dom.hotspotOptions.innerHTML = `<option value="无关联热点"></option>${hotspotCatalog
-      .map((group) => `<option value="${escapeHtml(group.name)}" label="${group.activities.length} 个活动"></option>`)
-      .join("")}`;
+    renderHotspotOptions("", false);
   }
 
   function normalizedHotspotFilter(value) {
     const normalized = String(value || "").trim();
     if (!normalized || normalized === "全部热点") return "all";
     if (normalized === "无关联热点") return "none";
-    return normalized;
+    return selectedHotspotGroup(normalized)?.name || normalized;
+  }
+
+  function focusHotspotWindow(group) {
+    const datedActivities = group.activities.filter((activity) => activity.start);
+    if (!datedActivities.length) return false;
+    const earliest = new Date(Math.min(...datedActivities.map((activity) => parseDate(activity.start).getTime())));
+    const latest = new Date(Math.max(...datedActivities.map((activity) => activityEnd(activity).getTime())));
+    state.start = addDays(earliest, -7);
+    state.end = addDays(latest, 7);
+    state.windowDays = daysBetween(state.start, state.end) + 1;
+    dom.start.value = isoDate(state.start);
+    dom.end.value = isoDate(state.end);
+    document.querySelectorAll("[data-window]").forEach((button) => button.classList.remove("is-active"));
+    return true;
   }
 
   function matchesHotspotFilter(value, filter = state.hotspot) {
@@ -388,7 +507,7 @@
       return `
         <div class="gantt-row" style="--row-accent:${accent};animation-delay:${Math.min(index, 20) * 12}ms">
           <div class="activity-label">
-            <div class="name"><strong title="${escapeHtml(activity.name)}">${escapeHtml(activity.name)}</strong><small>${formatDate(start)} — ${activity.end ? formatDate(end) : "结束待补"}</small></div>
+            <div class="name"><button type="button" class="gantt-title-button" data-title-activity-id="${escapeHtml(activity.id)}" title="${escapeHtml(activity.name)}" aria-label="查看 ${escapeHtml(activity.name)} 详情">${escapeHtml(activity.name)}</button><small>${formatDate(start)} — ${activity.end ? formatDate(end) : "结束待补"}</small></div>
           </div>
           <div class="timeline-cell" style="width:${timelineWidth}px">
             ${frame.backdrop}
@@ -413,7 +532,7 @@
       return `
         <div class="gantt-row hotspot-row" style="--row-accent:#73a9a8;animation-delay:${Math.min(index, 20) * 12}ms">
           <div class="activity-label hotspot-label">
-            <div class="name"><strong title="${escapeHtml(group.name)}">${escapeHtml(group.name)}${group.segmentTotal > 1 ? ` <em class="period-index">档期 ${group.segmentIndex}/${group.segmentTotal}</em>` : ""}</strong><small>${formatDate(frame.start)} — ${formatDate(frame.end)} · ${group.activities.length} 个活动</small></div>
+            <div class="name"><button type="button" class="gantt-title-button" data-title-hotspot-id="${escapeHtml(group.id)}" title="${escapeHtml(group.name)}" aria-label="查看热点 ${escapeHtml(group.name)} 详情">${escapeHtml(group.name)}${group.segmentTotal > 1 ? ` <em class="period-index">档期 ${group.segmentIndex}/${group.segmentTotal}</em>` : ""}</button><small>${formatDate(frame.start)} — ${formatDate(frame.end)} · ${group.activities.length} 个活动</small></div>
           </div>
           <div class="timeline-cell" style="width:${timelineWidth}px">
             ${frame.backdrop}
@@ -554,7 +673,7 @@
           <article class="resource-card" style="--resource-accent:${resourceAccent(resource)}">
             <span class="resource-icon">${escapeHtml(resource.type.slice(0, 1))}</span>
             <div class="resource-main">
-              <p class="resource-title">${escapeHtml(resource.name)}${resource.quantity != null ? ` × ${resource.quantity}` : ""}</p>
+              <p class="resource-title">${renderLinkedText(resource.name, resource.nameLinks)}${resource.quantity != null ? ` × ${resource.quantity}` : ""}</p>
               <div class="resource-meta">${escapeHtml(resource.type)}${resource.subtype && resource.subtype !== "/" ? ` · ${escapeHtml(resource.subtype)}` : ""}${resource.newness !== "/" ? ` · ${escapeHtml(resource.newness)}` : ""}</div>
             </div>
             <div class="resource-quality">${qualityBadge(resource.quality)}</div>
@@ -611,7 +730,7 @@
     const access = activity.type === "活跃" ? { key: "free", label: "免费" } : activity.type === "付费" ? { key: "paid", label: "付费" } : { key: "unknown", label: "待判断" };
     return `
       <article class="hotspot-resource-card access-${access.key}" style="--resource-accent:${resourceAccent(resource)}">
-        <div class="hotspot-resource-head"><strong>${escapeHtml(resource.name)}</strong><span class="hotspot-resource-flags">${qualityBadge(resource.quality)}<i class="resource-access-tag">${access.label}</i></span></div>
+        <div class="hotspot-resource-head"><strong>${renderLinkedText(resource.name, resource.nameLinks)}</strong><span class="hotspot-resource-flags">${qualityBadge(resource.quality)}<i class="resource-access-tag">${access.label}</i></span></div>
         <span class="hotspot-resource-meta">${escapeHtml(resource.type)}</span>
         <small title="${escapeHtml(activity.name)}">来自 ${escapeHtml(activity.name)}</small>
         ${expectation ? `<p class="hotspot-resource-expectation">${escapeHtml(expectation)}</p>` : ""}
@@ -694,13 +813,13 @@
     state.selected = activity;
     dom.drawer.classList.remove("is-hotspot");
     const allQualities = activity.skinQualities.map((quality) => qualityBadge(quality)).join("");
-    const hotspot = activity.hotspot ? `<span class="hotspot-chip">◆ ${escapeHtml(activity.hotspot)}</span>` : "";
+    const hotspot = activity.hotspot ? `<span class="hotspot-chip">◆ ${renderLinkedText(activity.hotspot, activity.hotspotLinks)}</span>` : "";
     const tags = [...activity.subtypes, activity.target, activity.type].filter(Boolean);
     dom.drawerContent.innerHTML = `
       ${parentHotspot ? `<button type="button" class="drawer-back" id="backToHotspot">← 返回 ${escapeHtml(parentHotspot.name)}</button>` : ""}
       <header class="drawer-hero">
         <div class="drawer-kicker">${allQualities}<span>${activity.highestSkinQuality ? "含皮肤资源" : "活动详情"}</span>${hotspot}</div>
-        <h2>${escapeHtml(activity.name)}</h2>
+        <h2>${renderLinkedText(activity.name, activity.nameLinks)}</h2>
         <div class="drawer-period">${formatDate(activity.start)} — ${activity.end ? formatDate(activity.end) : "结束时间待补充"}</div>
       </header>
       <section class="drawer-section">
@@ -789,6 +908,7 @@
     state.query = ""; state.type = "all"; state.quality = "all"; state.hotspot = "all";
     state.mode = "active"; state.grain = "week"; state.perspective = "activity";
     dom.search.value = ""; dom.type.value = "all"; dom.quality.value = "all"; dom.hotspot.value = ""; dom.hotspotClear.hidden = true;
+    closeHotspotOptions();
     document.querySelectorAll("[data-perspective]").forEach((button) => button.classList.toggle("is-active", button.dataset.perspective === "activity"));
     document.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "active"));
     document.querySelectorAll("[data-grain]").forEach((button) => button.classList.toggle("is-active", button.dataset.grain === "week"));
@@ -849,7 +969,47 @@
     dom.hotspot.addEventListener("input", () => {
       clearTimeout(hotspotTimer);
       dom.hotspotClear.hidden = !dom.hotspot.value;
-      hotspotTimer = setTimeout(() => { state.hotspot = normalizedHotspotFilter(dom.hotspot.value); state.shouldFocusWindow = true; render(); }, 120);
+      renderHotspotOptions(dom.hotspot.value, true);
+      hotspotTimer = setTimeout(() => {
+        const selectedGroup = selectedHotspotGroup(dom.hotspot.value);
+        state.hotspot = normalizedHotspotFilter(dom.hotspot.value);
+        if (selectedGroup) focusHotspotWindow(selectedGroup);
+        state.shouldFocusWindow = true;
+        render();
+      }, 120);
+    });
+    const selectHotspotOption = (value) => {
+      clearTimeout(hotspotTimer);
+      dom.hotspot.value = value;
+      dom.hotspotClear.hidden = !value;
+      const selectedGroup = selectedHotspotGroup(value);
+      state.hotspot = normalizedHotspotFilter(value);
+      if (selectedGroup) focusHotspotWindow(selectedGroup);
+      state.shouldFocusWindow = true;
+      closeHotspotOptions();
+      render();
+    };
+    dom.hotspot.addEventListener("focus", () => renderHotspotOptions(dom.hotspot.value, true));
+    dom.hotspot.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (dom.hotspotOptions.hidden) renderHotspotOptions(dom.hotspot.value, true);
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = activeHotspotOptionIndex < 0
+          ? (direction > 0 ? 0 : visibleHotspotOptions.length - 1)
+          : activeHotspotOptionIndex + direction;
+        activateHotspotOption(nextIndex);
+      } else if (event.key === "Enter" && activeHotspotOptionIndex >= 0) {
+        event.preventDefault();
+        selectHotspotOption(visibleHotspotOptions[activeHotspotOptionIndex].value);
+      } else if (event.key === "Escape") {
+        closeHotspotOptions();
+      }
+    });
+    dom.hotspotOptions.addEventListener("pointerdown", (event) => event.preventDefault());
+    dom.hotspotOptions.addEventListener("click", (event) => {
+      const option = event.target.closest(".hotspot-option");
+      if (option) selectHotspotOption(option.dataset.optionValue);
     });
     dom.hotspotClear.addEventListener("click", () => {
       clearTimeout(hotspotTimer);
@@ -859,6 +1019,10 @@
       state.shouldFocusWindow = true;
       render();
       dom.hotspot.focus();
+      renderHotspotOptions("", true);
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!event.target.closest(".hotspot-search-shell")) closeHotspotOptions();
     });
     dom.scaleDown.addEventListener("click", () => stepDisplayScale(-1));
     dom.scaleUp.addEventListener("click", () => stepDisplayScale(1));
@@ -887,10 +1051,12 @@
       render();
     }));
     dom.body.addEventListener("click", (event) => {
-      const bar = event.target.closest(".gantt-bar");
-      if (!bar || state.suppressBarClick) return;
-      if (bar.dataset.hotspotId) openHotspotDrawer(bar.dataset.hotspotId);
-      else if (bar.dataset.activityId) openDrawer(bar.dataset.activityId);
+      const trigger = event.target.closest(".gantt-bar, .gantt-title-button");
+      if (!trigger || state.suppressBarClick) return;
+      const hotspotId = trigger.dataset.hotspotId || trigger.dataset.titleHotspotId;
+      const activityId = trigger.dataset.activityId || trigger.dataset.titleActivityId;
+      if (hotspotId) openHotspotDrawer(hotspotId);
+      else if (activityId) openDrawer(activityId);
     });
     dom.drawerClose.addEventListener("click", closeDrawer);
     dom.backdrop.addEventListener("click", closeDrawer);
